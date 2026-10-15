@@ -6,9 +6,13 @@
     <androidx.camera.view.PreviewView android:id="@+id/preview"
         android:layout_width="match_parent" android:layout_height="match_parent"/>
 
+    <View android:id="@+id/focusRing" android:layout_width="72dp" android:layout_height="72dp"
+        android:visibility="gone"/>
+
     <TextView android:id="@+id/info" android:layout_width="wrap_content"
         android:layout_height="wrap_content" android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="40dp" android:textColor="#FFFFFF" android:textSize="16sp"/>
+        android:layout_marginTop="40dp" android:textColor="#FFFFFF" android:textSize="16sp"
+        android:background="#55000000" android:padding="4dp"/>
 
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:layout_gravity="bottom" android:orientation="vertical"
@@ -22,17 +26,27 @@
                     android:text="Flash: OFF" android:textAllCaps="false" android:textSize="12sp"/>
                 <Button android:id="@+id/btnFilter" android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:text="Normal" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnLock" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="AE/AF Lock: OFF" android:textAllCaps="false" android:textSize="12sp"/>
                 <Button android:id="@+id/btnAf" android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:text="AF: Auto" android:textAllCaps="false" android:textSize="12sp"/>
                 <Button android:id="@+id/btnNr" android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:text="Denoise: OFF" android:textAllCaps="false" android:textSize="12sp"/>
                 <Button android:id="@+id/btnStab" android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:text="Stabilize: OFF" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnEnhance" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Enhance: OFF" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnQ" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Photo: FAST" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnVfmt" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Video: auto" android:textAllCaps="false" android:textSize="12sp" android:visibility="gone"/>
+                <Button android:id="@+id/btnMic" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Mic: ON" android:textAllCaps="false" android:textSize="12sp" android:visibility="gone"/>
             </LinearLayout>
         </HorizontalScrollView>
 
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Exposure" android:textColor="#FFF" android:textSize="12sp"/>
+            android:text="Exposure (you can also drag up/down on the preview)" android:textColor="#FFF" android:textSize="12sp"/>
         <SeekBar android:id="@+id/exposure" android:layout_width="match_parent" android:layout_height="wrap_content"/>
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:text="Zoom" android:textColor="#FFF" android:textSize="12sp"/>
