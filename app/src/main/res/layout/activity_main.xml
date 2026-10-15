@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="#000000">
+
+    <androidx.camera.view.PreviewView android:id="@+id/preview"
+        android:layout_width="match_parent" android:layout_height="match_parent"/>
+
+    <TextView android:id="@+id/info" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="40dp" android:textColor="#FFFFFF" android:textSize="16sp"/>
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_gravity="bottom" android:orientation="vertical"
+        android:background="#99000000" android:padding="10dp">
+
+        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:scrollbars="none">
+            <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:orientation="horizontal">
+                <Button android:id="@+id/btnFlash" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Flash: OFF" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnFilter" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Normal" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnAf" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="AF: Auto" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnNr" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Denoise: OFF" android:textAllCaps="false" android:textSize="12sp"/>
+                <Button android:id="@+id/btnStab" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:text="Stabilize: OFF" android:textAllCaps="false" android:textSize="12sp"/>
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Exposure" android:textColor="#FFF" android:textSize="12sp"/>
+        <SeekBar android:id="@+id/exposure" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Zoom" android:textColor="#FFF" android:textSize="12sp"/>
+        <SeekBar android:id="@+id/zoom" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100"/>
+        <TextView android:id="@+id/focusLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Manual focus (left = far, right = close)" android:textColor="#FFF" android:textSize="12sp" android:visibility="gone"/>
+        <SeekBar android:id="@+id/focus" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:max="100" android:visibility="gone"/>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:gravity="center_vertical" android:layout_marginTop="8dp">
+            <ImageView android:id="@+id/thumb" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="56dp" android:scaleType="centerCrop" android:background="#444444"
+                android:padding="1dp"/>
+            <Button android:id="@+id/btnCapture" android:layout_width="0dp" android:layout_weight="1.5"
+                android:layout_height="64dp" android:text="●" android:textSize="28sp"/>
+            <Button android:id="@+id/btnMode" android:layout_width="0dp" android:layout_weight="1.2"
+                android:layout_height="wrap_content" android:text="PHOTO" android:textSize="12sp"/>
+            <Button android:id="@+id/btnSwitch" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="Flip" android:textAllCaps="false" android:textSize="12sp"/>
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>
