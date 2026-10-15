@@ -12,12 +12,19 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Range
 import android.util.Size
@@ -39,6 +46,9 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -51,6 +61,8 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.io.File
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -74,21 +86,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnQ: Button
     private lateinit var btnVfmt: Button
     private lateinit var btnMic: Button
+    private lateinit var btnDenoise: Button
 
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
+    private var cleanAudio: CleanAudio? = null
 
     private var lens = CameraSelector.LENS_FACING_BACK
     private var videoMode = false
     private var flashIdx = 0
     private var filterIdx = 0
     private var afIdx = 0            // 0 Auto, 1 Macro, 2 Manual
-    private var nrOn = false
-    private var stabOn = false
-    private var enhanceOn = false
-    private var qualityBest = false
+    private var denoiseLevel = 1     // 0 off, 1 medium, 2 high
+    private var enhanceOn = true
+    private var qualityBest = true
+    private var micMode = 0          // 0 clean, 1 standard, 2 off
     private var micMuted = false
     private var locked = false
     private var aeLockOn = false
@@ -99,16 +113,20 @@ class MainActivity : AppCompatActivity() {
     private var vChoices: List<VChoice> = emptyList()
     private var vIdx = 0
 
-    // touch tracking
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
     private var startEv = 0
     private var dragging = false
+    private var lastTapX = -1f
+    private var lastTapY = -1f
+    private var lastTapTime = 0L
 
     private val flashNames = listOf("OFF", "AUTO", "ON", "TORCH")
     private val afNames = listOf("Auto", "Macro", "Manual")
+    private val dnNames = listOf("OFF", "MED", "HIGH")
     private val io = Executors.newSingleThreadExecutor()
+    private val proc = Executors.newSingleThreadExecutor()
     private val hideRing = Runnable { ring.visibility = View.GONE }
     private val relock = Runnable { if (locked) { aeLockOn = true; applyCamera2Options() } }
 
@@ -134,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         previewView = findViewById(R.id.preview)
         previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        previewView.scaleType = PreviewView.ScaleType.FIT_CENTER   // what you see is what gets saved
         info = findViewById(R.id.info)
         exposure = findViewById(R.id.exposure)
         zoom = findViewById(R.id.zoom)
@@ -149,6 +168,7 @@ class MainActivity : AppCompatActivity() {
         btnQ = findViewById(R.id.btnQ)
         btnVfmt = findViewById(R.id.btnVfmt)
         btnMic = findViewById(R.id.btnMic)
+        btnDenoise = findViewById(R.id.btnNr)
 
         ring.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -182,23 +202,14 @@ class MainActivity : AppCompatActivity() {
             focusLabel.visibility = if (manual) View.VISIBLE else View.GONE
             applyCamera2Options()
         }
-        findViewById<Button>(R.id.btnNr).setOnClickListener { b ->
-            if (!nrOn && !supportsNr()) { toast("Noise reduction control isn't supported on this camera"); return@setOnClickListener }
-            nrOn = !nrOn
-            (b as Button).text = "Denoise: ${if (nrOn) "ON" else "OFF"}"
-            applyCamera2Options()
-        }
-        findViewById<Button>(R.id.btnStab).setOnClickListener { b ->
-            if (!stabOn && !supportsOis() && !supportsEis()) { toast("Stabilization isn't supported on this camera"); return@setOnClickListener }
-            stabOn = !stabOn
-            (b as Button).text = "Stabilize: ${if (stabOn) "ON" else "OFF"}"
-            if (stabOn && videoMode && !supportsEis()) toast("Video stabilization: optical only")
+        btnDenoise.setOnClickListener {
+            denoiseLevel = (denoiseLevel + 1) % dnNames.size
+            btnDenoise.text = "Denoise: ${dnNames[denoiseLevel]}"
             applyCamera2Options()
         }
         btnEnhance.setOnClickListener {
             enhanceOn = !enhanceOn
             btnEnhance.text = "Enhance: ${if (enhanceOn) "ON" else "OFF"}"
-            if (enhanceOn) toast("Enhance adds contrast, color and sharpening. Saving takes a few seconds.")
         }
         btnQ.setOnClickListener {
             qualityBest = !qualityBest
@@ -211,9 +222,14 @@ class MainActivity : AppCompatActivity() {
             startCamera()
         }
         btnMic.setOnClickListener {
-            micMuted = !micMuted
-            btnMic.text = "Mic: ${if (micMuted) "MUTED" else "ON"}"
-            if (hasAudioPermission()) recording?.mute(micMuted)
+            if (recording != null) {
+                micMuted = !micMuted
+                cleanAudio?.muted = micMuted
+                try { recording?.mute(micMuted) } catch (e: Exception) {}
+            } else {
+                micMode = (micMode + 1) % 3
+            }
+            updateMicLabel()
         }
         btnSwitch.setOnClickListener {
             lens = if (lens == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT
@@ -241,7 +257,7 @@ class MainActivity : AppCompatActivity() {
             applyCamera2Options()
         })
 
-        // Tap = focus + meter here. Long press = lock focus + exposure. Drag up/down = exposure.
+        // Tap = focus. Long press = lock focus + exposure. Drag up/down = exposure.
         previewView.setOnTouchListener { v, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -260,6 +276,7 @@ class MainActivity : AppCompatActivity() {
                     if (!dragging) {
                         val isLong = e.eventTime - downTime > 500
                         if (locked && !isLong) setLock(false, 0f, 0f)
+                        lastTapX = e.x; lastTapY = e.y; lastTapTime = System.currentTimeMillis()
                         if (isLong) setLock(true, e.x, e.y) else tapFocus(e.x, e.y)
                     }
                     v.performClick()
@@ -284,6 +301,11 @@ class MainActivity : AppCompatActivity() {
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun hasAudioPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun updateMicLabel() {
+        btnMic.text = if (recording != null) "Mic: ${if (micMuted) "MUTED" else "LIVE"}"
+        else "Mic: ${listOf("CLEAN", "STD", "OFF")[micMode]}"
+    }
 
     private fun simpleListener(cb: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
         override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) cb(p) }
@@ -329,7 +351,7 @@ class MainActivity : AppCompatActivity() {
             btnLock.text = "AE/AF Lock: ON"
             if (recording == null) info.text = "AE/AF LOCKED (tap to unlock)"
             previewView.removeCallbacks(relock)
-            previewView.postDelayed(relock, 1200)   // let exposure settle, then freeze it
+            previewView.postDelayed(relock, 1200)
         } else {
             locked = false
             aeLockOn = false
@@ -348,7 +370,7 @@ class MainActivity : AppCompatActivity() {
         cam.cameraControl.setExposureCompensationIndex(idx)
         cam.cameraInfo.exposureState.exposureCompensationRange.let { exposure.progress = idx - it.lower }
         if (recording == null && !locked) info.text = "EV $idx"
-        if (locked) {   // exposure lock blocks EV changes, so release it briefly
+        if (locked) {
             aeLockOn = false
             applyCamera2Options()
             previewView.removeCallbacks(relock)
@@ -380,7 +402,12 @@ class MainActivity : AppCompatActivity() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             val provider = future.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val previewSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(if (videoMode) AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                                        else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                .build()
+            val preview = Preview.Builder().setResolutionSelector(previewSelector).build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
             val selector = CameraSelector.Builder().requireLensFacing(lens).build()
             provider.unbindAll()
             locked = false
@@ -403,9 +430,16 @@ class MainActivity : AppCompatActivity() {
                     imageCapture = null
                     camera = provider.bindToLifecycle(this, selector, preview, vc)
                 } else {
+                    // 4:3, up to ~12 MP (a full 50-64 MP frame would run out of memory), full quality pipeline
+                    val rs = ResolutionSelector.Builder()
+                        .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                        .setResolutionStrategy(ResolutionStrategy(Size(4000, 3000),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER))
+                        .build()
                     val ic = ImageCapture.Builder()
                         .setCaptureMode(if (qualityBest) ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                                         else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setResolutionSelector(rs)
                         .build()
                     imageCapture = ic
                     videoCapture = null
@@ -445,6 +479,7 @@ class MainActivity : AppCompatActivity() {
         btnEnhance.visibility = p
         btnQ.visibility = p
         btnVfmt.text = "Video: ${vChoices.getOrNull(vIdx)?.label ?: "auto"}"
+        updateMicLabel()
     }
 
     private fun applyFlash() {
@@ -462,32 +497,21 @@ class MainActivity : AppCompatActivity() {
         previewView.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
     }
 
-    // ---------- camera2 extras: denoise, stabilize, focus, exposure lock ----------
+    // ---------- camera2 extras: in-camera noise reduction, focus, exposure lock ----------
     private fun <T> chr(key: CameraCharacteristics.Key<T>): T? =
         camera?.let { Camera2CameraInfo.from(it.cameraInfo).getCameraCharacteristic(key) }
 
     private fun minFocusDistance(): Float = chr(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
     private fun supportsNr() = chr(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)
         ?.contains(CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY) == true
-    private fun supportsOis() = chr(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
-        ?.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON) == true
-    private fun supportsEis() = chr(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
-        ?.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
     private fun supportsAeLock() = chr(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true
 
     private fun applyCamera2Options() {
         val cam = camera ?: return
         try {
             val b = CaptureRequestOptions.Builder()
-            if (nrOn && supportsNr()) {
+            if (denoiseLevel > 0 && supportsNr()) {
                 b.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
-                b.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
-            }
-            if (stabOn) {
-                if (supportsOis())
-                    b.setCaptureRequestOption(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
-                if (videoMode && supportsEis())
-                    b.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
             }
             if (aeLockOn && supportsAeLock()) {
                 b.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
@@ -505,15 +529,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- photo ----------
-    private fun buildMatrix(src: Bitmap): ColorMatrix {
+    // ---------- photo processing ----------
+    // Auto-levels + a little color, then the chosen filter. Applied while drawing, so it costs almost nothing.
+    private fun buildMatrix(src: Bitmap, enh: Boolean, fIdx: Int): ColorMatrix {
         val cm = ColorMatrix()
-        if (enhanceOn) {
+        if (enh) {
             val sw = 96
             val sh = 72
             val small = Bitmap.createScaledBitmap(src, sw, sh, true)
             val px = IntArray(sw * sh)
             small.getPixels(px, 0, sw, 0, 0, sw, sh)
+            small.recycle()
             val hist = IntArray(256)
             for (p in px) {
                 val l = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
@@ -531,13 +557,111 @@ class MainActivity : AppCompatActivity() {
             val s = 255f / (hi - lo)
             val o = -lo * s
             cm.postConcat(ColorMatrix(floatArrayOf(s,0f,0f,0f,o, 0f,s,0f,0f,o, 0f,0f,s,0f,o, 0f,0f,0f,1f,0f)))
-            cm.postConcat(sat(1.12f))
+            cm.postConcat(sat(1.18f))
         }
-        cm.postConcat(filters[filterIdx].second)
+        cm.postConcat(filters[fIdx].second)
         return cm
     }
 
-    // 3x3 sharpen, processed row by row so it doesn't need a second full-size copy of the photo
+    private fun luma(c: Int) = (299 * ((c shr 16) and 255) + 587 * ((c shr 8) and 255) + 114 * (c and 255)) / 1000
+
+    /**
+     * One pass over the photo, row by row (low memory):
+     *  - denoise: averages only neighbouring pixels of similar brightness (keeps edges), and smooths
+     *    color blotches/speckle using a heavily blurred copy, but not across real color edges
+     *  - enhance: local contrast ("clarity") and lifted shadows
+     */
+    private fun processPhoto(bmp: Bitmap, dn: Int, enhance: Boolean) {
+        val w = bmp.width
+        val h = bmp.height
+        if (w < 16 || h < 16 || (dn == 0 && !enhance)) return
+        var t = bmp
+        repeat(3) {
+            val n = Bitmap.createScaledBitmap(t, maxOf(t.width / 2, 2), maxOf(t.height / 2, 2), true)
+            if (t !== bmp) t.recycle()
+            t = n
+        }
+        val blur = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(blur).drawBitmap(t, null, Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+        t.recycle()
+
+        val thr = if (dn >= 2) 30 else 18
+        val cw = if (dn >= 2) 0.92f else 0.75f
+        val clarity = if (enhance) 0.5f else 0f
+        val shadow = if (enhance) 0.15f else 0f
+
+        var pxCur = IntArray(w)
+        var pxNext = IntArray(w)
+        var yPrev = IntArray(w)
+        var yCur = IntArray(w)
+        var yNext = IntArray(w)
+        val blurRow = IntArray(w)
+        val res = IntArray(w)
+        bmp.getPixels(pxCur, 0, w, 0, 0, w, 1)
+        for (x in 0 until w) yCur[x] = luma(pxCur[x])
+        System.arraycopy(yCur, 0, yPrev, 0, w)
+
+        for (y in 0 until h) {
+            if (y + 1 < h) bmp.getPixels(pxNext, 0, w, 0, y + 1, w, 1)
+            else System.arraycopy(pxCur, 0, pxNext, 0, w)
+            for (x in 0 until w) yNext[x] = luma(pxNext[x])
+            blur.getPixels(blurRow, 0, w, 0, y, w, 1)
+
+            for (x in 0 until w) {
+                val c = pxCur[x]
+                val r = (c shr 16) and 255
+                val g = (c shr 8) and 255
+                val b = c and 255
+                val yc = yCur[x]
+                var yd = yc
+                if (dn > 0 && x > 0 && x < w - 1) {
+                    var sum = yc
+                    var cnt = 1
+                    var v = yPrev[x - 1]; if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yPrev[x];     if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yPrev[x + 1]; if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yCur[x - 1];  if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yCur[x + 1];  if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yNext[x - 1]; if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yNext[x];     if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    v = yNext[x + 1]; if (abs(v - yc) < thr) { sum += v; cnt++ }
+                    yd = sum / cnt
+                }
+                val bp = blurRow[x]
+                val br = (bp shr 16) and 255
+                val bg = (bp shr 8) and 255
+                val bb = bp and 255
+                val ybl = luma(bp)
+                var cr = (r - yc).toFloat()
+                var cg = (g - yc).toFloat()
+                var cb = (b - yc).toFloat()
+                if (dn > 0) {
+                    val dr = (br - ybl).toFloat()
+                    val dg = (bg - ybl).toFloat()
+                    val db = (bb - ybl).toFloat()
+                    val e = abs(dr - cr) + abs(dg - cg) + abs(db - cb)
+                    val wgt = cw * (1f - ((e - 24f) / 60f).coerceIn(0f, 1f))
+                    cr += wgt * (dr - cr)
+                    cg += wgt * (dg - cg)
+                    cb += wgt * (db - cb)
+                }
+                var yo = yd.toFloat()
+                if (enhance) {
+                    yo += clarity * (yd - ybl)
+                    if (yo < 90f) yo += (90f - yo) * shadow
+                }
+                val nr = (yo + cr).toInt().coerceIn(0, 255)
+                val ng = (yo + cg).toInt().coerceIn(0, 255)
+                val nb = (yo + cb).toInt().coerceIn(0, 255)
+                res[x] = (c and (0xFF shl 24)) or (nr shl 16) or (ng shl 8) or nb
+            }
+            bmp.setPixels(res, 0, w, 0, y, w, 1)
+            val ty = yPrev; yPrev = yCur; yCur = yNext; yNext = ty
+            val tp = pxCur; pxCur = pxNext; pxNext = tp
+        }
+        blur.recycle()
+    }
+
     private fun sharpenInPlace(bmp: Bitmap, amount: Float) {
         val w = bmp.width
         val h = bmp.height
@@ -579,44 +703,78 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- photo capture ----------
+    // Focus first (on your last tap, or the center), wait for it, then shoot - this is what keeps photos sharp.
     private fun capture() {
+        val cam = camera
+        if (cam == null || afIdx == 2 || locked) { doCapture(); return }
+        var fired = false
+        val fire = Runnable { if (!fired) { fired = true; doCapture() } }
+        try {
+            val fresh = lastTapX >= 0f && System.currentTimeMillis() - lastTapTime < 4000
+            val px = if (fresh) lastTapX else previewView.width / 2f
+            val py = if (fresh) lastTapY else previewView.height / 2f
+            val pt = previewView.meteringPointFactory.createPoint(px, py)
+            info.text = "Focusing…"
+            val fut = cam.cameraControl.startFocusAndMetering(
+                FocusMeteringAction.Builder(pt, FocusMeteringAction.FLAG_AF).build())
+            fut.addListener(fire, ContextCompat.getMainExecutor(this))
+            previewView.postDelayed(fire, 2000)
+        } catch (e: Exception) { doCapture() }
+    }
+
+    private fun doCapture() {
         val ic = imageCapture ?: return
+        if (!locked) info.text = ""
+        val dn = denoiseLevel
+        val enh = enhanceOn
+        val fIdx = filterIdx
+        if (dn > 0 || enh) toast("Processing photo…")
         ic.takePicture(io, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
-                try {
-                    val rot = image.imageInfo.rotationDegrees
-                    val src = image.toBitmap()
+                val rot = image.imageInfo.rotationDegrees
+                val src = try { image.toBitmap() } catch (t: Throwable) {
                     image.close()
-                    val cm = buildMatrix(src)
-                    val swap = rot == 90 || rot == 270
-                    val ow = if (swap) src.height else src.width
-                    val oh = if (swap) src.width else src.height
-                    val out = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
-                    val m = Matrix().apply {
-                        postRotate(rot.toFloat())
-                        when (rot) {
-                            90 -> postTranslate(src.height.toFloat(), 0f)
-                            180 -> postTranslate(src.width.toFloat(), src.height.toFloat())
-                            270 -> postTranslate(0f, src.width.toFloat())
-                        }
-                    }
-                    Canvas(out).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG).apply {
-                        colorFilter = ColorMatrixColorFilter(cm)
-                    })
-                    src.recycle()
-                    if (enhanceOn) sharpenInPlace(out, 0.35f)
-                    val uri = savePhoto(out)
-                    val th = Bitmap.createScaledBitmap(out, 160, (160f * out.height / out.width).toInt().coerceAtLeast(1), true)
-                    out.recycle()
-                    runOnUiThread { showThumb(th, uri, "image/jpeg"); toast("Saved to Pictures/ProCam") }
-                } catch (e: Throwable) {
-                    runOnUiThread { toast("Couldn't process photo: ${e.message}") }
+                    runOnUiThread { toast("Couldn't read photo: ${t.message}") }
+                    return
                 }
+                image.close()
+                proc.execute { processAndSave(src, rot, dn, enh, fIdx) }
             }
             override fun onError(e: ImageCaptureException) {
                 runOnUiThread { toast("Capture failed: ${e.message}") }
             }
         })
+    }
+
+    private fun processAndSave(src: Bitmap, rot: Int, dn: Int, enh: Boolean, fIdx: Int) {
+        try {
+            val cm = buildMatrix(src, enh, fIdx)
+            val swap = rot == 90 || rot == 270
+            val ow = if (swap) src.height else src.width
+            val oh = if (swap) src.width else src.height
+            val out = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
+            val m = Matrix().apply {
+                postRotate(rot.toFloat())
+                when (rot) {
+                    90 -> postTranslate(src.height.toFloat(), 0f)
+                    180 -> postTranslate(src.width.toFloat(), src.height.toFloat())
+                    270 -> postTranslate(0f, src.width.toFloat())
+                }
+            }
+            Canvas(out).drawBitmap(src, m, Paint(Paint.FILTER_BITMAP_FLAG).apply {
+                colorFilter = ColorMatrixColorFilter(cm)
+            })
+            src.recycle()
+            processPhoto(out, dn, enh)
+            if (enh) sharpenInPlace(out, 0.5f)
+            val uri = savePhoto(out)
+            val th = Bitmap.createScaledBitmap(out, 160, (160f * out.height / out.width).toInt().coerceAtLeast(1), true)
+            out.recycle()
+            runOnUiThread { showThumb(th, uri, "image/jpeg"); toast("Saved to Pictures/ProCam") }
+        } catch (t: Throwable) {
+            runOnUiThread { toast("Couldn't process photo: ${t.message}") }
+        }
     }
 
     private fun savePhoto(bmp: Bitmap): Uri? {
@@ -642,18 +800,29 @@ class MainActivity : AppCompatActivity() {
         }
         val opts = MediaStoreOutputOptions.Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
             .setContentValues(cv).build()
+
+        val audioPerm = hasAudioPermission()
+        var clean: CleanAudio? = null
+        if (micMode == 0 && audioPerm) {
+            val ca = CleanAudio()
+            if (ca.start()) clean = ca else toast("Clean audio unavailable, using standard mic")
+        }
         var pending = vc.output.prepareRecording(this, opts)
-        val audio = hasAudioPermission()
-        if (audio) pending = pending.withAudioEnabled()
-        else toast("No mic permission - recording without sound")
+        val stdAudio = audioPerm && (micMode == 1 || (micMode == 0 && clean == null))
+        if (stdAudio) pending = pending.withAudioEnabled()
+        if (micMode != 2 && !audioPerm) toast("No mic permission - recording without sound")
+        cleanAudio = clean
+        micMuted = false
 
         recording = pending.start(ContextCompat.getMainExecutor(this)) { ev ->
             when (ev) {
                 is VideoRecordEvent.Start -> {
+                    cleanAudio?.let { it.offsetUs = (SystemClock.elapsedRealtimeNanos() - it.startNs) / 1000 }
                     btnCapture.text = "■"
                     btnMode.isEnabled = false
                     btnSwitch.isEnabled = false
                     btnVfmt.isEnabled = false
+                    updateMicLabel()
                 }
                 is VideoRecordEvent.Status -> {
                     val s = ev.recordingStats.recordedDurationNanos / 1_000_000_000
@@ -666,19 +835,121 @@ class MainActivity : AppCompatActivity() {
                     btnSwitch.isEnabled = true
                     btnVfmt.isEnabled = true
                     info.text = ""
+                    micMuted = false
+                    updateMicLabel()
+                    val ca = cleanAudio
+                    cleanAudio = null
                     if (!ev.hasError()) {
-                        val uri = ev.outputResults.outputUri
-                        var bmp: Bitmap? = null
-                        if (Build.VERSION.SDK_INT >= 29) {
-                            try { bmp = contentResolver.loadThumbnail(uri, Size(160, 160), null) } catch (e: Exception) {}
-                        }
-                        showThumb(bmp, uri, "video/mp4")
-                        toast("Saved to Movies/ProCam")
-                    } else toast("Recording error: ${ev.error}")
+                        val raw = ev.outputResults.outputUri
+                        if (ca != null) {
+                            toast("Cleaning audio…")
+                            proc.execute {
+                                ca.stop()
+                                val merged = try { remuxWithAudio(raw, ca) } catch (t: Throwable) { null }
+                                runOnUiThread { finishVideo(merged ?: raw, merged == null) }
+                            }
+                        } else finishVideo(raw, false)
+                    } else {
+                        if (ca != null) proc.execute { ca.stop() }
+                        toast("Recording error: ${ev.error}")
+                    }
                 }
             }
         }
-        if (audio) recording?.mute(micMuted)
+        if (stdAudio) try { recording?.mute(false) } catch (e: Exception) {}
+    }
+
+    private fun finishVideo(uri: Uri, audioFailed: Boolean) {
+        var bmp: Bitmap? = null
+        if (Build.VERSION.SDK_INT >= 29) {
+            try { bmp = contentResolver.loadThumbnail(uri, Size(160, 160), null) } catch (e: Exception) {}
+        }
+        showThumb(bmp, uri, "video/mp4")
+        toast(if (audioFailed) "Saved, but clean audio failed (video may be silent)" else "Saved to Movies/ProCam")
+    }
+
+    // Put the cleaned audio into the recorded video (video stream is copied untouched, no re-encoding)
+    private fun remuxWithAudio(raw: Uri, audio: CleanAudio): Uri? {
+        val fmt = audio.format ?: return null
+        val frames = synchronized(audio.frames) { audio.frames.toList() }
+        if (frames.isEmpty()) return null
+        val tmp = File(cacheDir, "mux_${System.currentTimeMillis()}.mp4")
+        val ex = MediaExtractor()
+        try {
+            ex.setDataSource(this, raw, null)
+            var vi = -1
+            for (i in 0 until ex.trackCount) {
+                val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) { vi = i; break }
+            }
+            if (vi < 0) return null
+            val vf = ex.getTrackFormat(vi)
+            var rot = 0
+            try {
+                val mr = MediaMetadataRetriever()
+                mr.setDataSource(this, raw)
+                rot = mr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+                mr.release()
+            } catch (e: Exception) {}
+
+            val mux = MediaMuxer(tmp.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            mux.setOrientationHint(rot)
+            val vt = mux.addTrack(vf)
+            val at = mux.addTrack(fmt)
+            mux.start()
+            ex.selectTrack(vi)
+
+            val maxSz = if (vf.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) vf.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0
+            val buf = ByteBuffer.allocate(maxOf(maxSz, 4 * 1024 * 1024))
+            val bi = MediaCodec.BufferInfo()
+            val off = audio.offsetUs
+            var ai = 0
+            var t0 = -1L
+            var lastRel = 0L
+
+            fun writeAudioUpTo(limit: Long) {
+                while (ai < frames.size) {
+                    val f = frames[ai]
+                    val pts = f.pts - off
+                    if (pts > limit) break
+                    ai++
+                    if (pts < 0) continue
+                    bi.set(0, f.data.size, pts, 0)
+                    mux.writeSampleData(at, ByteBuffer.wrap(f.data), bi)
+                }
+            }
+
+            while (true) {
+                buf.clear()
+                val size = ex.readSampleData(buf, 0)
+                if (size < 0) break
+                val t = ex.sampleTime
+                if (t0 < 0) t0 = t
+                val rel = t - t0
+                writeAudioUpTo(rel)
+                val flags = if ((ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                bi.set(0, size, rel, flags)
+                mux.writeSampleData(vt, buf, bi)
+                lastRel = rel
+                ex.advance()
+            }
+            writeAudioUpTo(lastRel + 100_000)
+            mux.stop()
+            mux.release()
+
+            val cv = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, "ProCam_${System.currentTimeMillis()}")
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ProCam")
+            }
+            val out = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv) ?: return null
+            contentResolver.openOutputStream(out)?.use { os -> tmp.inputStream().use { it.copyTo(os) } }
+            contentResolver.delete(raw, null, null)
+            return out
+        } finally {
+            try { ex.release() } catch (e: Exception) {}
+            tmp.delete()
+        }
     }
 
     // ---------- preview of last shot ----------
@@ -696,5 +967,11 @@ class MainActivity : AppCompatActivity() {
         } catch (e: ActivityNotFoundException) { toast("No gallery app found") }
     }
 
-    override fun onDestroy() { super.onDestroy(); recording?.stop(); io.shutdown() }
+    override fun onDestroy() {
+        super.onDestroy()
+        recording?.stop()
+        cleanAudio?.let { ca -> proc.execute { ca.stop() } }
+        io.shutdown()
+        proc.shutdown()
+    }
 }
